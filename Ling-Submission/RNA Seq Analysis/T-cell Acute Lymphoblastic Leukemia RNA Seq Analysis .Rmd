@@ -1,0 +1,316 @@
+---
+title: "T-cell Acute Lymphoblastic Leukemia RNA Seq Analysis "
+author: "Ling Min Hao"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  bookdown::html_document2:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false 
+    code_folding: hide
+    theme: journal
+    highlight: haddock
+bibliography: references.bib 
+nocite: '@*'
+---
+
+```{r setup and library, warning=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+# Setup
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, 
+                      cache = FALSE, echo = TRUE)
+```
+
+```{r Libraries, results = FALSE,  warning = FALSE, message = FALSE}
+# Load the libraries
+library(DT)
+library(recount)
+library(DESeq2)
+library(tidyverse)
+library(tibble)
+library(EnhancedVolcano)
+library(knitr)
+library(plyr)
+library(EnsDb.Hsapiens.v86)
+library(pheatmap)
+library(msigdbr)
+library(clusterProfiler)
+library(ggpubr)
+library(rlist)
+```
+
+# Introduction
+
+**T-cell acute lymphoblastic leukemia (T-ALL)** is a specific type of leukemia. **BBC3**
+is the gene helpful to inhibit the growth and proliferation of T-ALL, and **HES1** in the
+**NOTCH1 signaling pathway** downregulates BBC3. On the other hand, perhexiline has some
+good antileukemic effect on T-ALL.[@schnell2015therapeutic]. 
+
+So, we proposed that perhexiline might be a drug that downregulates HES1. To address this
+gap in knowledge, we performed differential gene expression (DGE) analysis on data from
+CUTLL1, a novel human T-cell lymphoma cell lines. We performed the analysis on
+**three control samples** and **three samples treated with perhexiline**, an antagonist 
+drug with robust anti-leukemic activity against **T-ALL** in vitro and in vivo using the 
+[dataset SRP055108](https://trace.ncbi.nlm.nih.gov/Traces/sra/?study=SRP055108).
+
+```{r DESeq dataset}
+### Prepare DEseq dataset
+## A leukemia dataset is selected and loaded from recount 2
+selected_study <- "SRP055108"
+if (! file.exists("SRP055108/rse_gene.Rdata")){
+  download_study(selected_study)
+} 
+load("SRP055108/rse_gene.Rdata")
+
+## Tidy the dataset 
+# Convert ENSG to Gene Symbol 
+ens2sym <- AnnotationDbi::select(EnsDb.Hsapiens.v86, keys = keys(EnsDb.Hsapiens.v86),
+                                 columns = c("SYMBOL"))
+# Count Matrix
+countData <- as.data.frame(assay(rse_gene)) %>% 
+  rownames_to_column("GENEID") %>% 
+  filter(!grepl(pattern = "_PAR_Y",GENEID)) %>%  
+  mutate(GENEID = gsub(GENEID, pattern = "\\..+", replacement = "")) %>% # cleaning the ensembl id
+  inner_join(ens2sym, by = "GENEID") %>%  # connect with gene symbol
+  dplyr::select(-GENEID) %>% 
+  group_by(SYMBOL) %>% 
+  summarise(across(everything(), ~ sum(., is.na(.), 0))) %>% # aggregrate rows with same gene symbol
+  ungroup() %>% 
+  column_to_rownames("SYMBOL") # count matrix with row name (gene symbol) and column name (samples)
+
+# Assign the label "Control" or "Treated" to the samples
+colData(rse_gene)$condition <- gsub(colData(rse_gene)$title, pattern = "^C.*",
+                                    replacement = "Control")
+colData(rse_gene)$condition <- gsub(colData(rse_gene)$condition, pattern = "^T.*",
+                                    replacement = "Treated")
+colData <- as.data.frame(colData(rse_gene)) %>% 
+  dplyr::select(condition)
+
+## Convert to DESeq dataset 
+dds <- DESeqDataSetFromMatrix(countData, colData, design = ~condition) 
+```
+
+```{r sample and condition}
+# Table showing controlled and treated samples 
+datatable(colData, colnames = c("Sample", "Condition"), 
+          caption = "Control and Treated Samples from CUTLL cell lines")
+```
+
+We will first need to investigate the quality of dataset. The PCA plot (Figure \@ref(fig:QC))
+below shows that most variation in the dataset is biological. So, this is a good dataset. 
+
+```{r QC, fig.align = "center", fig.cap = "PCA Plot. 78% of the variation of the dataset are due to biological variation"}
+## Quality Check of dataset
+# Get rlog 
+rld <- rlog(dds)
+# plot PCA
+plotPCA(rld)
+```
+
+# Results 
+## Differential Gene Expression (DGE) Analysis
+
+```{r DESeq2}
+## DESeq2 Analysis 
+# Get results 
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("condition", "Treated", "Control"))
+# LFC shrink (to compensate for low count genes with high dispersion values)
+resNorm <- lfcShrink(dds = dds, res = res, type = "normal", coef = 2)
+# Make into data frames
+resdf <- as.data.frame(resNorm) %>% rownames_to_column("SYMBOL")
+```
+
+We first performed differential gene expression analysis. Then, we obtained the volcano
+plot (Figure \@ref(fig:VolcanoPlot)) visualizing the amount of differentially expressed
+genes (DEG) uncovered
+
+```{r VolcanoPlot, fig.height = 7, fig.width = 9, fig.align = "center", fig.cap = "Volcano plot (P < 0.05) visualizing the amount of DEGs after DGE Analysis. The most overexpressed genes are towards the right, the most underexpressed genes are towards the left, and the most statistically significant genes are towards the top."}
+EnhancedVolcano(resdf, 
+                lab = resdf$SYMBOL,
+                pCutoff = 0.05,
+                x = "log2FoldChange", 
+                y = "padj",
+                title = "Differentially Expressed Genes (DEG)", 
+                subtitle = "", 
+                legendLabels=c('Not sig.','Log (base 2) FC','p-value', 'p-value & Log (base 2) FC'), 
+                pointSize = 4.0,
+                labSize = 6.0)
+```
+
+Here we list out all differentially expressed genes. 
+
+```{r DEGlist, results="asis"}
+# All over-expressed and under-expressed gene list
+deg_list <- resdf %>% 
+  dplyr::filter(padj < .05) %>% # Filter for significant results
+  mutate(result = case_when(
+    log2FoldChange > 0 ~ "Over-expressed", 
+    TRUE ~ "Under-expressed"
+  )) %>% 
+  group_by(result) %>% # Group by result column 
+  arrange(padj) %>% 
+  {setNames(group_split(.), group_keys(.)[[1]])} # Split tibble into list by group with names
+
+# Tabulate the gene list
+GENE <- llply(names(deg_list), function(groupNow){
+  datatable(deg_list[[groupNow]] %>% dplyr::select(c(SYMBOL, baseMean, log2FoldChange, padj)), 
+            caption = paste0(groupNow, ' Gene List'), 
+            )
+})
+
+GENE[[1]]
+GENE[[2]]
+```
+
+We now study the top 20 overexpressed and underexpressed DEGs using heatmap (Figure \@ref(fig:Heatmap)) below. 
+
+```{r Heatmap, fig.height = 7, fig.width = 9, fig.align = "center", fig.cap = "Heat map representation of the top 20 differentially under-expressed and over-expressed genes (P < 0.05) between control and perhexiline-treated CUTLL1 cells. The scale bar shows color-coded differential gene expression, with red indicating high gene expression levels and blue indicating lower gene expression levels."}
+# Get top 20 over-expressed and under-expressed gene list 
+top20_deg_list <- deg_list %>% 
+  llply(slice_min, order_by = padj, n = 20)
+# Subset count matrix from top 20 over-expressed and top 20 under-expressed genes
+top20_degs_mat <- as.data.frame(assay(rld)) %>%
+  dplyr::filter(rownames(assay(rld)) %in% 
+                  (rbind(top20_deg_list$`Over-expressed`, top20_deg_list$`Under-expressed`) %>% 
+                  dplyr::pull(SYMBOL)))
+
+# Plot the heatmap
+pheatmap(top20_degs_mat, scale = "row", 
+         clustering_distance_rows = "correlation", annotation_col = colData,
+         main="Top 20 Differentially Underexpressed and Overexpressed Genes")
+```
+
+## Pathway Analysis 
+### Broad-Spectrum Pathway Analysis{.tabset}
+
+Using the overexpressed and underexpressed genes, we perform a brief pathway analysis using
+[Enrichr](https://maayanlab.cloud/Enrichr/). The holistic results are shown in the link below. 
+
+```{r childRMD, results='asis'}
+# Get the gene sets and wrangle
+gene_sets <- msigdbr(species = "Homo sapiens", category = "C5")
+gene_sets <- gene_sets %>%
+  dplyr::select(gs_name, gene_symbol)
+
+# Pull the gene symbol from DEGs
+deg_symbol <- deg_list %>% 
+  llply(pull, var = "SYMBOL") 
+
+ENRICHR <- llply(names(deg_symbol), function(groupNow) {
+  genesNow <- deg_symbol[[groupNow]]
+  response <- httr::POST(  # Post request to enrichr based on https://maayanlab.cloud/Enrichr/help#api&q=1
+    url = 'https://maayanlab.cloud/Enrichr/addList', 
+    body = list(
+      'list' = paste0(genesNow, collapse = "\n"),
+      'description' = groupNow
+      )
+    )
+  response <- jsonlite::fromJSON(httr::content(response, as = "text"))  # Collect response
+  permalink <- paste0("https://maayanlab.cloud/Enrichr/enrich?dataset=",  # Create permalink
+                      response$shortId[1])
+  # See this for more guidance: https://bookdown.org/yihui/rmarkdown-cookbook/child-document.html
+  knitr::knit_child(text = c(  # Text vector to be knitted into RMarkdown as a child
+    '#### `r groupNow` Pathways',
+    '',
+    'Enrichr Link: <a href="`r permalink`" target="_blank">`r groupNow`</a>.',
+    ''
+  ), 
+  envir = environment(),  # Current global environment will be passed into the RMarkdown child
+  quiet = TRUE)
+})
+
+cat(unlist(ENRICHR), sep = '\n')
+```
+
+### Gene Set Enrichment Analysis
+
+We perform Gene Set Enrichment Analysis (GSEA) on the ontology gene sets to obtain a ranked 
+list of upregulated and downregulated biological pathways on perhexiline treatment in CUTLL1 cells. 
+
+```{r GSEA, results = "asis"}
+# Get the gene sets and wrangle
+gene_sets <- msigdbr(species = "Homo sapiens", category = "C5")
+gene_sets <- gene_sets %>%
+  dplyr::select(gs_name, gene_symbol)
+
+# Adding a score for GSEA
+resdf2 <- resdf %>%
+  arrange(padj) %>%
+  mutate(gsea_metric = -log10(padj) * sign(log2FoldChange))
+
+# Remove NAs and order by GSEA
+resdf2 <- resdf2 %>%
+  filter(! is.na(gsea_metric)) %>%
+  arrange(desc(gsea_metric))
+
+# Get the ranked GSEA vector
+ranks <- resdf2 %>%
+  select(SYMBOL, gsea_metric) %>%
+  distinct(SYMBOL, .keep_all = TRUE) %>%
+  deframe()
+
+# Run GSEA
+gseares <- GSEA(geneList = ranks, 
+                TERM2GENE = gene_sets)
+gsearesdf <- as.data.frame(gseares)
+
+pathway_list <- gsearesdf %>% 
+  mutate(result = case_when(
+    NES > 0 ~ "Over-expressed", 
+    TRUE ~ "Under-expressed"
+  )) %>% 
+  group_by(result) %>% # Group by result column 
+  arrange(desc(abs(NES))) %>% # Arrange the rows according to NES score
+  {setNames(group_split(.), group_keys(.)[[1]])} # Split tibble into list by group with names
+
+# Tabulate the pathway list
+PATHWAY <- llply(names(pathway_list), function(groupNow){
+  datatable(pathway_list[[groupNow]] %>% dplyr::select(c(ID,NES, p.adjust)), 
+            caption = paste0(groupNow, ' Biological Pathways'), 
+            )
+})
+
+PATHWAY[[1]]
+PATHWAY[[2]]
+```
+
+Specifically, we analyze the top 5 upregulated and downregulated biological pathways on 
+perhexiline treatment in CUTLL1 cells. 
+
+```{r GSEAPlot, results = "asis", fig.width = 32, fig.height = 20, fig.align = "center", fig.cap = c("GSEA analysis plots of top 5 upregulated biological pathways on perhexiline treatment in CUTLL1 cells", "GSEA analysis plots of top 5 downregulated biological pathways on perhexiline treatment in CUTLL1 cells")}
+## Make GSEA plot for top and bottom results
+# Get top 5 over-expressed and under-expressed biological pathways 
+top5_pathway_list <- pathway_list %>% 
+  llply(slice_max, order_by = abs(NES), n = 5) 
+## -- Make gseaplot for each and return as list
+TOPPATHWAY <- llply(names(top5_pathway_list), function(groupNow){
+  list <- top5_pathway_list[[groupNow]] %>% pull(ID)
+  top_pathway_plots <- lapply(list, function(pathway) {
+    gseaplot(gseares, geneSetID = pathway, title = pathway)
+  })
+  ## -- Arrange with labels as a multi-panel plot
+  final <- ggarrange(plotlist = top_pathway_plots, ncol = 3, nrow = 2, labels = "AUTO")
+  annotate_figure(final, top = text_grob(paste0("Top 5 ", groupNow, " Biological Pathways"), face = "bold", size = 30))
+})
+
+TOPPATHWAY[[1]]
+TOPPATHWAY[[2]]
+```
+
+# Discussion
+
+Based on the analysis, perhexiline did not significantly downregulate HES1. In fact, 
+perhexiline slightly upregulates HES1 (it is ranked 94 in the DEG gene list). So there are
+other reasons why perhexiline treats T-ALL. After analyzing the biological pathway using
+GSEA, most biological processes related to cell division and cell growth are downregulated. 
+This is not a surprising result because the production of tumors is due to abniormal rapid 
+cell growth. Since perhexiline stops T-ALL, we expect the downregulation of those processes. 
+
+Yet, it is unknown whether perhexiline directly caused the downregulation. The finding shows
+perhexiline upregulates most processes related to the production of steroids. So, it could 
+be that steroid is the one that downregulated cell division and cell growth processes. 
+As a result, steroids might be the potential treatment for T-ALL. Further investigation 
+is needed to verify this new conjecture. 
+
+# References 
