@@ -1,0 +1,238 @@
+---
+title: "R for Data Science"
+author: "Ling Min Hao"
+date: "8/26/2021"
+output:
+  html_document:
+    toc: true
+    theme: cerulean
+    toc_float: true
+    code_folding: hide
+---
+  
+```{r, results = FALSE, warning = FALSE, message = FALSE}
+# Load the libraries 
+library(tidyverse)
+library(plotly)
+library(broom)
+library(knitr)
+```  
+  
+This mini-project demands a good understanding of the statistical test. For more 
+information about statistical testing, please refer to this 
+[link](https://www.youtube.com/c/BrandonFoltz/playlists?view=50&sort=dd&shelf_id=3). 
+In this mini-project, the task is to analyze `gapminder_clean.csv`dataset using
+`R`and `tidyverse`. For this mini-project, the p-value decision rule is set to be 
+$\alpha = 0.05$. 
+
+
+## **Part 1**
+Complete the following analysis in `R` and generate a `RMarkdown`report to show 
+the analysis and results: 
+
+### **Question 1** 
+Read in the `gapminder_clean.csv data` as a `tibble` using `read_csv`. 
+
+
+```{r, class.source = 'fold-show', message = FALSE, results = FALSE}
+gapminder <- read_csv("gapminder_clean.csv")
+
+# Rename column names of gapminder dataset. 
+gapminder <- gapminder %>% rename(co2_emission = `CO2 emissions (metric tons per capita)`, country_name =`Country Name`, 
+energy_use = `Energy use (kg of oil equivalent per capita)`, imports_services = `Imports of goods and services (% of GDP)`, 
+population_density = `Population density (people per sq. km of land area)`, 
+life_expectancy = `Life expectancy at birth, total (years)`)
+```
+### **Question 2** 
+Filter the data to include only rows where `Year` is `1962` and then make a scatter plot comparing `CO2 emissions (metric tons per capita)` 
+and `gdpPercap` for the filtered data. 
+
+```{r, warning = FALSE}
+# Filter gapminder dataset with year 1962 and scatterplot (in logarithmic scale) comparing CO2 emissions and gdpPercap
+gapminder %>%
+  filter(Year == 1962) %>% 
+  ggplot(aes(x = gdpPercap, y = co2_emission)) + 
+  geom_point(alpha = 0.3) + scale_x_log10(name = "GDP per capita (log10)") + 
+  scale_y_log10(name = "CO2 emissions metric tons per capita (log10)") + labs(title="CO2 emissions vs GDP in 1962 (Logarithmic Scale)") + theme_classic()
+```
+
+### **Question 3** 
+On the filtered data, calculate the pearson correlation of `CO2 emissions (metric tons per capita)` and `gdpPercap`. 
+What is the Pearson R value and associated p value? 
+
+```{r, }
+
+# Filter the data
+gapminder_1962 <- gapminder %>%
+  filter(Year == 1962)
+
+# Correlation test 
+test_result <- tidy(cor.test(gapminder_1962$co2_emission,gapminder_1962$gdpPercap))
+test_result
+```
+
+From the table above, the ***correlation between CO2 emissions and gdpPercap is `r test_result$estimate`*** 
+and the associated ***p value is `r as.numeric(test_result$p.value)`***. 
+
+### **Question 4 ** 
+On the unfiltered data, answer "In what year is the correlation between `CO2 emissions (metric tons per capita)` and `gdpPercap` the strongest?" 
+Filter the dataset to that year for the next step... 
+
+```{r}
+
+# Correlation for all years
+gap_cor <- gapminder %>%
+  group_by(Year) %>%
+  summarize(correlation = cor(co2_emission, gdpPercap, use = "complete.obs")) %>%
+  arrange(desc(correlation))
+
+gap_cor
+```
+From the table above, the correlation between CO2 emissions and gdpPercap is the strongest at year ***`r max(gap_cor$Year)`***
+with a ***correlation value of `r max(gap_cor$correlation)`***. 
+
+### **Question 5** 
+Using `plotly`, create an interative scatter plot comparing `CO2 emissions (metric tons per capita)` and `gdpPercap`, where the point size is 
+determined by `pop` (population) 
+and the color is determined by the `continent`. You can easily convert any `ggplot` to a `plotly` plot using the `ggplotly()` command.  
+
+```{r}
+# Scatterplot for year with strongest correlation between CO2 emissions and gdpPercap
+gapminder_scatter_P1Q2 <- gapminder %>%
+  filter(Year == 1967, !is.na(continent)) %>%
+  ggplot(aes(x = gdpPercap, y = co2_emission, size = pop, color = continent)) + geom_point() + scale_x_log10(name = "GDP per capita (log10)") +
+  scale_y_log10("CO2 emissions metric tons per capita (log10)") + guides(color = guide_legend(order=2), size = guide_legend(order = 1)) + 
+  labs(title="CO2 emissions vs GDP in 1962 (Logarithmic Scale)") + theme_classic()
+
+ggplotly(gapminder_scatter_P1Q2, width = 800, height = 500)
+
+```
+
+## **Part 2** 
+Now, without further guidance, use your `R` Data Science skills (and appropriate statistical tests) to answer the following: 
+
+### **Question 1**
+What is the relationship between `continent` and `'Energy use (kg of oil equivalent per capita)'` ? (stats test needed)
+
+```{r, warning = FALSE}
+
+# Filter the continent column to avoid missing values
+gapminder_continent_filter <- gapminder %>% 
+  filter(!is.na(continent))
+
+# Boxplot comparing energy use between continents
+ggplot(gapminder_continent_filter, aes(x = continent, y = energy_use)) + geom_boxplot() + labs(title="Relationships between Energy use and Continent") +
+  scale_x_discrete(name = 'Continent') + scale_y_continuous(name = 'Energy use (kg of oil equivalent per capita)') + theme_classic()
+
+```
+
+The boxplot above describes the difference in energy use for different continents. 
+We first use ***one-way ANOVA test*** to verify whether this difference is real or 
+it is due to random noise like sampling error.
+
+```{r}
+
+# p-value outcome from one-way ANOVA test
+aov_test_result <- tidy(aov(energy_use~continent, data = gapminder_continent_filter))
+
+aov_test_result
+
+```
+
+From the table above, the ***p-value for this test is `r aov_test_result$p.value[1]`*** 
+and thus it is ***statistically significant***. 
+
+**one-way ANOVA test** only tells us whether there is a significant difference between continents concerning energy usage, but we do not know where 
+these differences 
+occur. To further verify this, we need to perform a post-hoc test, for instance, 
+**Tukey's test** to check statistical significance for all possible combinations of two
+out of all continents. 
+
+```{r}
+
+# Tukey test
+tukey_test <- TukeyHSD(aov(energy_use~as.factor(continent), data = gapminder_continent_filter))
+
+# Filter the combinations with p-value >0.05
+filtered_tukey_test <- tidy(tukey_test) %>% filter(adj.p.value >= 0.05)
+
+tukey_test
+```
+
+From the table above, we can see that ***only `r filtered_tukey_test$contrast` combinations*** are ***not statistically significant*** whereas the others do. 
+
+### **Question 2** 
+Is there a significant difference between Europe and Asia with respect to `'Imports of goods and services (% of GDP)'` in the years after 1990? 
+(stats test needed)
+
+```{r}
+# Filter Asia and Europe out from continent column
+gapminder_Asia_Europe <- gapminder %>% filter(continent %in% c('Europe','Asia'))
+
+# Perform t test
+t_test <- t.test(gapminder_Asia_Europe$imports_services~gapminder_Asia_Europe$continent)
+
+df_t_test <- tidy(t_test)
+t_test 
+
+```
+
+For this question, I performed ***two-sided unpaired t-test***. From the table, 
+the resulting ***p-value is `r df_t_test$p.value`***. So I conclude that the 
+difference is ***statistically significant***. 
+
+### **Question 3** 
+What is the country (or countries) that has the highest `'Population density (people per sq. km of land area)'` across all years? 
+(i.e., which country has the highest average ranking in this category across 
+each time point in the dataset?)
+
+```{r}
+# gapminder pop density ranking by country across all years
+gapminder_ranking_by_year <- gapminder %>%
+  group_by(Year) %>%
+  arrange(desc(population_density)) %>%
+  mutate(ranking = row_number())
+
+# gapminder average pop density ranking by country across all years
+gapminder_avg_rank <- gapminder_ranking_by_year %>%
+  group_by(country_name) %>% 
+  summarize(avg_rank = mean(ranking)) %>%
+  arrange(avg_rank)
+
+# countr/countries with best average pop density ranking
+best_rank <- gapminder_avg_rank %>% 
+  filter(avg_rank == min(avg_rank))
+
+gapminder_avg_rank
+
+```
+
+From the table above, ***`r best_rank$country_name`*** has the highest average 
+ranking of ***`r best_rank$avg_rank[1]`*** (lower is better) in population density 
+across all years. 
+
+### **Question 4** 
+What country (or countries) has shown the greatest increase in `'Life expectancy at birth, total (years)'` since 1962?
+
+```{r}
+
+# life expectancy increase by country across all years
+gapminder_overall_lifeExp_increase <- gapminder %>% 
+  group_by(country_name) %>% 
+  summarize(overall_increase = tail(life_expectancy, n = 1) - head(life_expectancy, n = 1)) %>%
+  filter(!is.na(overall_increase)) %>% 
+  arrange(desc(overall_increase))
+
+# country/countries with highest life expectancy increase
+gapminder_greatest_lifeExp_increase <- gapminder_overall_lifeExp_increase %>% 
+  filter(overall_increase == max(overall_increase))
+
+gapminder_overall_lifeExp_increase
+```
+From the table above,  ***`r gapminder_greatest_lifeExp_increase$country_name`*** showed the greatest increase of 
+***`r gapminder_greatest_lifeExp_increase$overall_increase[1]`*** in life expectancy 
+since 1962. 
+
+## **Reference**
+
+1. [DataCamp R for Data Scientist Career Track](https://learn.datacamp.com/career-tracks/data-scientist-with-r) 
