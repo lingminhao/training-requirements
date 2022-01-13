@@ -1,0 +1,200 @@
+---
+title: "E18 Mice Heart Cell scRNA Seq Analysis" 
+author: "Ling Min Hao"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    theme: cerulean
+    toc_float: true
+    code_folding: hide
+bibliography: references.bib
+nocite: '@*'
+link-citations: true
+---
+
+```{r, warning = FALSE, message = FALSE}
+# Load the libraries
+library(Seurat)
+library(tidyverse)
+library(ggpubr)
+library(Matrix)
+library(cowplot)
+library(enrichR)
+
+```
+
+## Introduction 
+
+```{r, warning = FALSE, message = FALSE}
+#Preparing 1k Heart Cells from an E18 mouse dataset
+## Download the dataset and import into Seurat 
+heart.data <- Read10X(data.dir = "filtered_feature_bc_matrix/")
+heart <- CreateSeuratObject(counts = heart.data)
+```
+
+**Cardiomyocyte** is a cell type responsible to generate contractile force in the 
+intact heart. Here we perform single-cell RNA-seq on an 
+**E18 Mice Heart Cell** dataset, with the advantage to attribute findings specifically
+to the cardiomyocytes rather than interactions with other cell types. 
+
+```{r, fig.width = 30, fig.height = 10, warning = FALSE, messange = FALSE, collapse = TRUE}
+## Perform downstream QC steps to filter the data
+
+# nCount_RNA is the number of UMI counts in a cell
+# nFeature_RNA is the number of different genes that had any reads (detected)
+# percent.mt is the percent mitochondrial reads
+
+# Add percent.mt content
+heart$percent.mt <- PercentageFeatureSet(heart, pattern = "^mt-")
+
+# QC plots
+violin_QC <- VlnPlot(heart, features = c("nFeature_RNA", "nCount_RNA", 
+                            "percent.mt"), ncol = 3)
+feature_QC1 <- FeatureScatter(heart, feature1 = "nCount_RNA",
+                              feature2 = "percent.mt")
+feature_QC2 <- FeatureScatter(heart, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+qc_final <- ggarrange(violin_QC,feature_QC1,feature_QC2, ncol = 3, labels = "AUTO")
+annotate_figure(qc_final, top = text_grob("Quality Control Plot", face = "bold", size = 30))
+# Subset to remove low quality cell
+heart <- subset(heart, subset = nCount_RNA < 20000 &
+                 nFeature_RNA < 4000 & percent.mt < 15)
+```
+
+The E18 Mice Heart Cell dataset is first filtered way from poor quality data after interpreting the QC plot above. 
+
+## Results
+
+### 1. Cell Type Identification
+
+```{r, message = FALSE, results = FALSE, warning = FALSE, fig.width = 20, fig.height = 10, collapse = TRUE}
+### Do the steps necessary for getting a UMAP of the data and clusters
+
+## Normalize and Scaling
+heart <- heart %>%
+  NormalizeData() %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() 
+
+## Principal Component Analysis (PCA)
+heart <- RunPCA(heart)
+
+# Select number of PCs using the below Elbow Plot
+# ElbowPlot(heart, ndims = 50)
+
+## Nearest neighbor graph, clustering, and embedding
+# number of PCs = 30
+heart <- heart %>% 
+  FindNeighbors(dims = 1:30) %>%
+  FindClusters(resolution = 0.5) %>%
+  RunUMAP(dims = 1:30) 
+
+## Assign and identify cell types to each cell in RenameIdents using panglaodb as 
+## reference
+# Find markers for cluster
+cluster_markers <- lapply(seq(0,5,1), function(label){
+  FindMarkers(heart, ident.1 = label, only.pos = TRUE, logfc.threshold = .5,
+              min.pct = 0.25)
+})
+
+# Violin plot for top 2 cluster markers 
+violin_plots <- lapply(cluster_markers, function(cluster) {
+  VlnPlot(heart, features = rownames(cluster %>%top_n(2, -log10(p_val))))
+})
+violin_final <- ggarrange(plotlist = violin_plots, ncol = 2, nrow = 3, labels = "AUTO")
+annotate_figure(violin_final, top = text_grob("Top 2 Differentially Expressed Genes in Each Cell Cluster (Identity)", face = "bold", size = 20))
+```
+
+Using the manual cell type classification technique, we obtain the 
+**top 2 genes overexpressed** associated with each cell cluster labeled with numbers. 
+Using these overexpressed genes and [PanglaoDb](https://panglaodb.se/search.html)
+database, we can quickly identify the cell type of each cluster. As a result, we 
+obtain the **cell type cluster map** as shown below. 
+
+```{r, fig.width = 10, fig.height = 6}
+# Renaming cell cluster using cell type
+heart <- heart %>% 
+  RenameIdents(c(
+  "0" = "Endothelial Cells",
+  "1" = "T memory Cells / B Cells",
+  "2" = "Erythroid Precursor Cells",
+  "3" = "Fibroblast",
+  "4" = "Macrophages",
+  "5" = "Cardiomyocytes"
+  ))
+
+heart$Cell.Type.Cluster.Map <- Idents(heart)
+Idents(heart) <- heart$seurat_clusters
+
+# Dim plot of UMAP
+DimPlot(heart, group.by = "Cell.Type.Cluster.Map")
+```
+
+### 2. Cluster Marker Analysis and Pathway Analysis
+
+```{r, message = FALSE, results = FALSE, fig.width = 18, fig.height = 8}
+### Cluster 5 (cardiomyocytes) Analysis
+## Find all markers for all clusters
+heart.markers <- FindAllMarkers(heart, 
+                               only.pos = TRUE, 
+                               min.pct = 0.25, 
+                               logfc.threshold = 0.5)
+sig_markers <- heart.markers %>% 
+  filter(p_val_adj < .05)
+
+## Select database to interpret 
+to_check <- c("Mouse_Gene_Atlas", "WikiPathways_2019_Mouse", "KEGG_2019_Mouse")
+
+## Enrichment Analysis
+# Pull the Cluster 5 genes as a vector
+cluster5_genes <- sig_markers %>%
+  filter(cluster == "5") %>%
+  pull(gene)
+# Run through enrichr
+cluster5_eresList <- enrichr(cluster5_genes, databases = to_check)
+# Plotting function for cluster enrichment results
+plot_eres <- function(eres_name, eres_list, n = 5) {
+  eres <- eres_list[[eres_name]]
+  eres %>%
+    top_n(n = n, wt = -log10(Adjusted.P.value)) %>%
+    arrange(-log10(Adjusted.P.value)) %>%
+    mutate(Term = factor(Term, levels = Term)) %>%
+    ggplot(mapping = aes(x = Term, y = -log10(Adjusted.P.value), fill = Combined.Score)) +
+    geom_bar(stat = "identity") +
+    ggpubr::rotate() +
+    theme_bw(base_size = 16) +
+    rremove("ylab") +
+    labs(title = eres_name)
+}
+# Get the top hits from each and plot them
+plotList <- lapply(names(cluster5_eresList), plot_eres, eres_list = cluster5_eresList)
+cowplot::plot_grid(plotlist = plotList, labels = "AUTO",
+                   label_size = 18, align = "vh") +
+  patchwork::plot_annotation(title = "Cardiomyocytes Enrichment Analysis Plot", 
+                             theme = theme(title = element_text(size = 25)))
+```
+
+## Interpretation of Results
+
+From the cluster marker analysis using **Mouse Gene Atlas**, we can see that all 
+overexpressed genes are related to the heart. This validates that our analysis is 
+consistent with the dataset. Using **WikiPathways 2019 Mouse** database, we can see
+that **Electron Transport Chain** and **Oxidative Phosphorylation** are greatly 
+overexpressed when these biological pathways generates ATP. This is not a surprise 
+following our intuition that heart contraction requires a lot of energy, i.e 
+cardiomyocytes are cells requiring high ATP content. This can be seen from the fact
+the cardiomyocytes themselves have an abundance of mitochondria. Thus, a possible 
+way to treat impaired cardiac contraction would be to find a drug that stimulates 
+Electron Transport Chain and Oxidative Phosphorylation pathway [@brown2017mitochondrial].
+
+Using **KEGG 2019 Mouse** database, we interestingly found that diseases like Parkinson's
+Disease [@scorza2018cardiac] and Hummington's Disease [@melkani2016huntington] might
+cause cardiomyocytes malfunction. Thus, the drugs
+that stimulate Electron Transport Chain and Oxidative Phosphorylation pathway would
+be needed for these patients as a preventive measure. 
+
+## References
+
+<div id="refs"></div>
+
